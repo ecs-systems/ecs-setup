@@ -11,12 +11,16 @@
 #   -m, --module ID       Module ID (e.g., ecs-writer, ecs-marketing)
 #   -l, --language LANG   Language code (e.g., en, de)
 #   -y, --yes             Auto-confirm all prompts (non-interactive)
+#   -u, --update          Update setup.sh to the latest version
+#   -v, --version         Show current version
+#   --no-update-check     Skip automatic update check
 #   -h, --help            Show this help message
 #
 # Examples:
 #   ./setup.sh                                              # Interactive mode
 #   ./setup.sh -m ecs-writer -l en -p MyNovel -a "John" -y  # Fully automated
 #   ./setup.sh --module ecs-marketing --project Launch      # Partial automation
+#   ./setup.sh --update                                     # Update to latest version
 #
 # Modules and languages are auto-detected from the ecs-studio repository.
 #
@@ -33,12 +37,19 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 BOLD='\033[1m'
 
+# Version and Update Settings
+SETUP_VERSION="1.0.0"
+SETUP_REPO="ecs-systems/ecs-setup"
+SETUP_SCRIPT_URL="https://raw.githubusercontent.com/ecs-systems/ecs-setup/main/setup.sh"
+UPDATE_CHECK_INTERVAL=86400  # 24 hours in seconds
+
 ECS_HOME="$HOME/ECS-Studio"
 TOOLS_DIR="$ECS_HOME/.tools"
 CACHE_DIR="$ECS_HOME/.cache"
 CACHE_AUTHOR="$CACHE_DIR/author_name"
 CACHE_MODULE="$CACHE_DIR/module"
 CACHE_LANGUAGE="$CACHE_DIR/language"
+CACHE_UPDATE_CHECK="$CACHE_DIR/update_check"
 
 # Find gh binary: local installation first, then system-wide
 find_gh_binary() {
@@ -60,6 +71,9 @@ ARG_AUTHOR=""
 ARG_MODULE=""
 ARG_LANGUAGE=""
 ARG_YES=false
+ARG_UPDATE=false
+ARG_VERSION=false
+ARG_NO_UPDATE_CHECK=false
 
 # Runtime variables
 SELECTED_MODULE=""
@@ -86,12 +100,16 @@ show_help() {
     echo "  -m, --module ID       Module ID (e.g., ecs-writer, ecs-marketing)"
     echo "  -l, --language LANG   Language code (e.g., en, de)"
     echo "  -y, --yes             Auto-confirm all prompts (non-interactive)"
+    echo "  -u, --update          Update setup.sh to the latest version"
+    echo "  -v, --version         Show current version"
+    echo "  --no-update-check     Skip automatic update check"
     echo "  -h, --help            Show this help message"
     echo ""
     echo "Examples:"
     echo "  ./setup.sh                                              # Interactive mode"
     echo "  ./setup.sh -m ecs-writer -l en -p MyNovel -a \"John\" -y  # Fully automated"
     echo "  ./setup.sh --module ecs-marketing --project Launch      # Partial automation"
+    echo "  ./setup.sh --update                                     # Update to latest version"
     echo ""
     echo "Modules and languages are auto-detected from the repository."
     echo ""
@@ -119,6 +137,18 @@ parse_args() {
                 ;;
             -y|--yes)
                 ARG_YES=true
+                shift
+                ;;
+            -u|--update)
+                ARG_UPDATE=true
+                shift
+                ;;
+            -v|--version)
+                ARG_VERSION=true
+                shift
+                ;;
+            --no-update-check)
+                ARG_NO_UPDATE_CHECK=true
                 shift
                 ;;
             -h|--help|-\?)
@@ -370,6 +400,114 @@ get_other_projects() {
 
     # Projekte zurückgeben (eines pro Zeile)
     printf '%s\n' "${projects[@]}"
+}
+
+# ============================================
+# Auto-Update Functions
+# ============================================
+
+# Get version from remote script
+get_remote_version() {
+    curl -sL "$SETUP_SCRIPT_URL" 2>/dev/null | grep "^SETUP_VERSION=" | head -1 | cut -d'"' -f2
+}
+
+# Compare versions (semantic versioning)
+# Returns 0 if $1 > $2
+version_gt() {
+    [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" != "$1" ]
+}
+
+# Check if update check is needed (based on cache)
+should_check_updates() {
+    [ ! -f "$CACHE_UPDATE_CHECK" ] && return 0
+
+    local last_check
+    last_check=$(cat "$CACHE_UPDATE_CHECK" 2>/dev/null)
+    [ -z "$last_check" ] && return 0
+
+    local now diff
+    now=$(date +%s)
+    diff=$((now - last_check))
+
+    [ "$diff" -gt "$UPDATE_CHECK_INTERVAL" ]
+}
+
+# Check for updates (returns new version if available)
+check_for_updates() {
+    if ! should_check_updates; then
+        return 1  # Recently checked, skip
+    fi
+
+    local remote_version
+    remote_version=$(get_remote_version)
+
+    # Update cache timestamp
+    mkdir -p "$CACHE_DIR"
+    date +%s > "$CACHE_UPDATE_CHECK"
+
+    if [ -z "$remote_version" ]; then
+        return 1  # Could not check
+    fi
+
+    if version_gt "$remote_version" "$SETUP_VERSION"; then
+        echo "$remote_version"
+        return 0  # Update available
+    fi
+
+    return 1  # No update
+}
+
+# Perform the update
+perform_update() {
+    local script_path="$0"
+    local backup_path="${script_path}.backup"
+
+    print_step "Downloading latest version..."
+
+    local new_script
+    new_script=$(curl -sL "$SETUP_SCRIPT_URL")
+
+    if [ -z "$new_script" ]; then
+        print_error "Failed to download update."
+        return 1
+    fi
+
+    # Verify downloaded script has a version
+    local new_version
+    new_version=$(echo "$new_script" | grep "^SETUP_VERSION=" | head -1 | cut -d'"' -f2)
+
+    if [ -z "$new_version" ]; then
+        print_error "Downloaded script appears invalid (no version found)."
+        return 1
+    fi
+
+    # Create backup
+    cp "$script_path" "$backup_path"
+    print_success "Backup created: $backup_path"
+
+    # Write new script
+    echo "$new_script" > "$script_path"
+    chmod +x "$script_path"
+
+    print_success "Updated to version $new_version"
+
+    # Update cache to avoid immediate re-check
+    mkdir -p "$CACHE_DIR"
+    date +%s > "$CACHE_UPDATE_CHECK"
+
+    # Restart script with original arguments (minus --update)
+    local args=()
+    for arg in "$@"; do
+        if [ "$arg" != "--update" ] && [ "$arg" != "-u" ]; then
+            args+=("$arg")
+        fi
+    done
+
+    if [ ${#args[@]} -gt 0 ]; then
+        exec "$script_path" "${args[@]}"
+    else
+        exec "$script_path"
+    fi
 }
 
 # ============================================
@@ -1417,7 +1555,39 @@ main() {
     # Parse command line arguments first
     parse_args "$@"
 
+    # --version: Show version and exit
+    if [ "$ARG_VERSION" = true ]; then
+        echo "ECS-Setup version $SETUP_VERSION"
+        exit 0
+    fi
+
+    # --update: Explicit update
+    if [ "$ARG_UPDATE" = true ]; then
+        echo ""
+        echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║${NC}     ${BOLD}ECS-Setup — Update${NC}                     ${CYAN}║${NC}"
+        echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo "Current version: $SETUP_VERSION"
+        echo ""
+        perform_update "$@"
+        exit 0
+    fi
+
     print_header
+
+    # Auto-update check (unless disabled)
+    if [ "$ARG_NO_UPDATE_CHECK" != true ]; then
+        local new_version
+        new_version=$(check_for_updates)
+        if [ -n "$new_version" ]; then
+            print_warning "New version available: $new_version (current: $SETUP_VERSION)"
+            if confirm "Update now?"; then
+                perform_update "$@"
+            fi
+            echo ""
+        fi
+    fi
 
     # Show parameters if any were provided
     if [ -n "$ARG_PROJECT" ] || [ -n "$ARG_AUTHOR" ] || [ -n "$ARG_MODULE" ] || [ -n "$ARG_LANGUAGE" ] || [ "$ARG_YES" = true ]; then
