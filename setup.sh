@@ -38,7 +38,7 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # Version and Update Settings
-SETUP_VERSION="1.0.0"
+SETUP_VERSION="1.0.1"
 SETUP_REPO="ecs-systems/ecs-setup"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/ecs-systems/ecs-setup/main/setup.sh"
 UPDATE_CHECK_INTERVAL=86400  # 24 hours in seconds
