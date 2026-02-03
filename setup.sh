@@ -1579,7 +1579,7 @@ main() {
     # Auto-update check (unless disabled)
     if [ "$ARG_NO_UPDATE_CHECK" != true ]; then
         local new_version
-        new_version=$(check_for_updates)
+        new_version=$(check_for_updates) || true
         if [ -n "$new_version" ]; then
             print_warning "New version available: $new_version (current: $SETUP_VERSION)"
             if confirm "Update now?"; then
