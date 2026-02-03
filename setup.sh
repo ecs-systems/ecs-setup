@@ -38,7 +38,7 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # Version and Update Settings
-SETUP_VERSION="1.0.1"
+SETUP_VERSION="1.1.0"
 SETUP_REPO="ecs-systems/ecs-setup"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/ecs-systems/ecs-setup/main/setup.sh"
 UPDATE_CHECK_INTERVAL=86400  # 24 hours in seconds
@@ -570,7 +570,7 @@ cleanup_modules() {
 
 # List user's repositories
 list_user_repos() {
-    "$GH_BIN" repo list --limit 100 --json name,description,updatedAt \
+    "$GH_BIN" repo list --limit 100 --topic ecs-studio --json name,description,updatedAt \
         --jq '.[] | "\(.name)\t\(.description // "No description")"' 2>/dev/null
 }
 
@@ -1543,6 +1543,9 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
     print_step "Creating GitHub repository..."
 
     "$GH_BIN" repo create "$PROJECT_NAME" --private --source=. --remote=origin --push
+
+    # Add ecs-studio topic for filtering in custom module selection
+    "$GH_BIN" repo edit "$PROJECT_NAME" --add-topic ecs-studio 2>/dev/null || true
 
     print_success "GitHub repository created: $REPO_NAME"
 }
