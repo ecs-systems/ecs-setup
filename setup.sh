@@ -38,7 +38,7 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # Version and Update Settings
-SETUP_VERSION="1.1.0"
+SETUP_VERSION="1.1.1"
 SETUP_REPO="ecs-systems/ecs-setup"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/ecs-systems/ecs-setup/main/setup.sh"
 UPDATE_CHECK_INTERVAL=86400  # 24 hours in seconds
@@ -495,7 +495,14 @@ perform_update() {
     mkdir -p "$CACHE_DIR"
     date +%s > "$CACHE_UPDATE_CHECK"
 
-    # Restart script with original arguments (minus --update)
+    # If explicit --update was used, just exit
+    if [ "$ARG_UPDATE" = true ]; then
+        echo ""
+        print_success "Update complete. Run setup.sh again to create a project."
+        exit 0
+    fi
+
+    # Auto-update during normal run: restart script with original arguments
     local args=()
     for arg in "$@"; do
         if [ "$arg" != "--update" ] && [ "$arg" != "-u" ]; then
