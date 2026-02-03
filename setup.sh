@@ -67,6 +67,9 @@ SELECTED_LANGUAGE=""
 PROJECT_NAME=""
 AUTHOR_NAME=""
 MODULE_DIR=""  # Temporary directory with cloned modules
+CUSTOM_MODULE=false  # Flag for custom module from user's repos
+CUSTOM_REPO=""  # Selected custom repository name
+CUSTOM_REPO_DIR=""  # Temporary directory for custom repo
 
 # ============================================
 # Argument Parsing
@@ -418,6 +421,107 @@ cleanup_modules() {
     if [ -n "$MODULE_DIR" ] && [ -d "$MODULE_DIR" ]; then
         rm -rf "$MODULE_DIR"
     fi
+    if [ -n "$CUSTOM_REPO_DIR" ] && [ -d "$CUSTOM_REPO_DIR" ]; then
+        rm -rf "$CUSTOM_REPO_DIR"
+    fi
+}
+
+# ============================================
+# Custom Module from User's Repositories
+# ============================================
+
+# List user's repositories
+list_user_repos() {
+    "$GH_BIN" repo list --limit 100 --json name,description,updatedAt \
+        --jq '.[] | "\(.name)\t\(.description // "No description")"' 2>/dev/null
+}
+
+# Choose a custom module from user's repositories
+choose_custom_module() {
+    print_step "Loading your repositories..."
+
+    local repos=()
+    local repo_descriptions=()
+
+    while IFS=$'\t' read -r name desc; do
+        [ -z "$name" ] && continue
+        repos+=("$name")
+        repo_descriptions+=("$desc")
+    done < <(list_user_repos)
+
+    if [ "${#repos[@]}" -eq 0 ]; then
+        print_error "No repositories found in your GitHub account."
+        return 1
+    fi
+
+    print_success "Found ${#repos[@]} repository/repositories"
+
+    echo ""
+    echo -e "${BOLD}Choose a repository as template:${NC}"
+    echo ""
+
+    # Show repos with pagination (first 20)
+    local show_count=20
+    local i=1
+    for idx in "${!repos[@]}"; do
+        if [ "$i" -gt "$show_count" ]; then
+            echo "  ... and $((${#repos[@]} - show_count)) more (enter name to search)"
+            break
+        fi
+        local desc="${repo_descriptions[$idx]}"
+        if [ ${#desc} -gt 50 ]; then
+            desc="${desc:0:47}..."
+        fi
+        printf "  %2d) %-25s %s\n" "$i" "${repos[$idx]}" "$desc"
+        i=$((i + 1))
+    done
+    echo ""
+
+    local choice
+    choice=$(ask_question "Repository (number or name)" "1")
+
+    # Handle numeric choice
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#repos[@]}" ]; then
+        CUSTOM_REPO="${repos[$((choice-1))]}"
+    else
+        # Try to match as name (partial match)
+        local found=false
+        for repo in "${repos[@]}"; do
+            if [[ "$repo" == *"$choice"* ]]; then
+                CUSTOM_REPO="$repo"
+                found=true
+                break
+            fi
+        done
+
+        if ! $found; then
+            print_error "Repository not found: $choice"
+            return 1
+        fi
+    fi
+
+    print_success "Selected: $CUSTOM_REPO"
+
+    # Clone the custom repository
+    print_step "Loading repository '$CUSTOM_REPO'..."
+
+    CUSTOM_REPO_DIR=$(mktemp -d)
+
+    local clone_output
+    if ! clone_output=$("$GH_BIN" repo clone "$GH_USER/$CUSTOM_REPO" "$CUSTOM_REPO_DIR" -- --depth 1 2>&1); then
+        print_error "Failed to clone repository."
+        echo "$clone_output" | head -3
+        rm -rf "$CUSTOM_REPO_DIR"
+        return 1
+    fi
+
+    print_success "Repository loaded"
+
+    # Set flags
+    CUSTOM_MODULE=true
+    SELECTED_MODULE="custom"
+
+    return 0
 }
 
 # ============================================
@@ -536,8 +640,35 @@ choose_module() {
         echo ""
     done
 
+    # Add custom module option
+    local custom_option=$i
+    echo "  $i) Eigenes Modul"
+    echo "     Verwende eines deiner GitHub-Repositories als Vorlage"
+    echo ""
+
     local choice
     choice=$(ask_question "Module" "$default_choice")
+
+    # Check for custom module option
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -eq "$custom_option" ]; then
+        if choose_custom_module; then
+            return 0
+        else
+            # If custom module selection failed, ask again
+            choose_module
+            return
+        fi
+    fi
+
+    # Check for "eigenes" or "custom" text match
+    if [[ "${choice,,}" == *"eigen"* ]] || [[ "${choice,,}" == *"custom"* ]]; then
+        if choose_custom_module; then
+            return 0
+        else
+            choose_module
+            return
+        fi
+    fi
 
     # Handle numeric choice
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#modules[@]}" ]; then
@@ -568,6 +699,13 @@ choose_module() {
 # ============================================
 
 choose_language() {
+    # Skip language selection for custom modules
+    if [ "$CUSTOM_MODULE" = true ]; then
+        SELECTED_LANGUAGE="custom"
+        print_success "Language: from template repository"
+        return
+    fi
+
     local module_path="$MODULE_DIR/$SELECTED_MODULE"
 
     # Get available languages for selected module
@@ -1084,6 +1222,11 @@ create_new_project() {
     local module_path="$MODULE_DIR/$SELECTED_MODULE"
     local lang_path="$module_path/$SELECTED_LANGUAGE"
 
+    # For custom modules, use the custom repo directory
+    if [ "$CUSTOM_MODULE" = true ]; then
+        lang_path="$CUSTOM_REPO_DIR"
+    fi
+
     # Load cached author name (if available)
     local cached_author=""
     if [ -f "$CACHE_AUTHOR" ]; then
@@ -1119,13 +1262,21 @@ create_new_project() {
     echo "$AUTHOR_NAME" > "$CACHE_AUTHOR"
 
     # Get module and language display names
-    local module_yaml="$module_path/module.yaml"
-    local module_display=$(get_yaml_value "$module_yaml" "name")
-    [ -z "$module_display" ] && module_display="$SELECTED_MODULE"
+    local module_display
+    local lang_display
 
-    local lang_yaml="$lang_path/language.yaml"
-    local lang_display=$(get_yaml_value "$lang_yaml" "name")
-    [ -z "$lang_display" ] && lang_display="$SELECTED_LANGUAGE"
+    if [ "$CUSTOM_MODULE" = true ]; then
+        module_display="Eigenes Modul ($CUSTOM_REPO)"
+        lang_display="from template"
+    else
+        local module_yaml="$module_path/module.yaml"
+        module_display=$(get_yaml_value "$module_yaml" "name")
+        [ -z "$module_display" ] && module_display="$SELECTED_MODULE"
+
+        local lang_yaml="$lang_path/language.yaml"
+        lang_display=$(get_yaml_value "$lang_yaml" "name")
+        [ -z "$lang_display" ] && lang_display="$SELECTED_LANGUAGE"
+    fi
 
     # Summary
     echo ""
@@ -1134,8 +1285,12 @@ create_new_project() {
     echo ""
     echo "  Project:       $PROJECT_NAME"
     echo "  Author:        $AUTHOR_NAME"
-    echo "  Module:        $module_display"
-    echo "  Language:      $lang_display"
+    if [ "$CUSTOM_MODULE" = true ]; then
+        echo "  Template:      $GH_USER/$CUSTOM_REPO"
+    else
+        echo "  Module:        $module_display"
+        echo "  Language:      $lang_display"
+    fi
     echo "  Folder:        $PROJECT_DIR"
     echo "  GitHub Repo:   $REPO_NAME"
     echo ""
@@ -1153,32 +1308,41 @@ create_new_project() {
     # Create project directory
     mkdir -p "$PROJECT_DIR"
 
-    # Copy only the selected module/language
-    print_step "Setting up $module_display ($lang_display)..."
-    cp -r "$lang_path/"* "$PROJECT_DIR/"
-    cp -r "$lang_path/".* "$PROJECT_DIR/" 2>/dev/null || true
-
-    # Remove build-time config file (not needed in target project)
-    rm -f "$PROJECT_DIR/language.yaml"
-
-    print_success "Module loaded"
-
-    # Create content folders from language.yaml
-    print_step "Creating content folders..."
-
-    while IFS= read -r folder; do
-        [ -z "$folder" ] && continue
-        mkdir -p "$PROJECT_DIR/$folder"
-        touch "$PROJECT_DIR/$folder/.gitkeep"
-    done < <(get_yaml_array "$lang_yaml" "folders")
-
-    # Create inbox README from language.yaml
-    local inbox_readme=$(get_yaml_multiline "$lang_yaml" "inbox_readme")
-    if [ -n "$inbox_readme" ]; then
-        echo "$inbox_readme" > "$PROJECT_DIR/inbox/README.md"
+    # Copy files from template
+    if [ "$CUSTOM_MODULE" = true ]; then
+        print_step "Setting up from template '$CUSTOM_REPO'..."
+        # Copy all files except .git directory
+        rsync -a --exclude='.git' "$CUSTOM_REPO_DIR/" "$PROJECT_DIR/"
+    else
+        print_step "Setting up $module_display ($lang_display)..."
+        cp -r "$lang_path/"* "$PROJECT_DIR/"
+        cp -r "$lang_path/".* "$PROJECT_DIR/" 2>/dev/null || true
+        # Remove build-time config file (not needed in target project)
+        rm -f "$PROJECT_DIR/language.yaml"
     fi
 
-    print_success "Content folders created"
+    print_success "Template loaded"
+
+    # Create content folders from language.yaml (only for standard modules)
+    if [ "$CUSTOM_MODULE" != true ]; then
+        local lang_yaml="$lang_path/language.yaml"
+
+        print_step "Creating content folders..."
+
+        while IFS= read -r folder; do
+            [ -z "$folder" ] && continue
+            mkdir -p "$PROJECT_DIR/$folder"
+            touch "$PROJECT_DIR/$folder/.gitkeep"
+        done < <(get_yaml_array "$lang_yaml" "folders")
+
+        # Create inbox README from language.yaml
+        local inbox_readme=$(get_yaml_multiline "$lang_yaml" "inbox_readme")
+        if [ -n "$inbox_readme" ]; then
+            echo "$inbox_readme" > "$PROJECT_DIR/inbox/README.md"
+        fi
+
+        print_success "Content folders created"
+    fi
 
     # Configure project
     print_step "Configuring project..."
@@ -1193,16 +1357,19 @@ create_new_project() {
         sed_inplace "s/{{AUTHOR_NAME}}/$AUTHOR_NAME/g" "$PROJECT_DIR/_bmad/core/config.yaml" 2>/dev/null || true
     fi
 
-    # Create config.yaml from language.yaml template
-    local config_dir="$PROJECT_DIR/_bmad/ecs"
-    if [ -d "$config_dir" ]; then
-        local config_template=$(get_yaml_multiline "$lang_yaml" "config_template")
-        if [ -n "$config_template" ]; then
-            # Replace placeholders
-            config_template=$(echo "$config_template" | sed "s/{{AUTHOR_NAME}}/$AUTHOR_NAME/g")
-            config_template=$(echo "$config_template" | sed "s/{{PROJECT_NAME}}/$PROJECT_NAME/g")
-            config_template=$(echo "$config_template" | sed "s/{{DATE}}/$(date '+%Y-%m-%d')/g")
-            echo "$config_template" > "$config_dir/config.yaml"
+    # Create config.yaml from language.yaml template (only for standard modules)
+    if [ "$CUSTOM_MODULE" != true ]; then
+        local lang_yaml="$lang_path/language.yaml"
+        local config_dir="$PROJECT_DIR/_bmad/ecs"
+        if [ -d "$config_dir" ]; then
+            local config_template=$(get_yaml_multiline "$lang_yaml" "config_template")
+            if [ -n "$config_template" ]; then
+                # Replace placeholders
+                config_template=$(echo "$config_template" | sed "s/{{AUTHOR_NAME}}/$AUTHOR_NAME/g")
+                config_template=$(echo "$config_template" | sed "s/{{PROJECT_NAME}}/$PROJECT_NAME/g")
+                config_template=$(echo "$config_template" | sed "s/{{DATE}}/$(date '+%Y-%m-%d')/g")
+                echo "$config_template" > "$config_dir/config.yaml"
+            fi
         fi
     fi
 
@@ -1214,13 +1381,23 @@ create_new_project() {
     cd "$PROJECT_DIR"
     git init -q
     git add -A
-    git commit -q -m "Project '$PROJECT_NAME' created
+
+    if [ "$CUSTOM_MODULE" = true ]; then
+        git commit -q -m "Project '$PROJECT_NAME' created from template
+
+Template: $GH_USER/$CUSTOM_REPO
+Author: $AUTHOR_NAME
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+    else
+        git commit -q -m "Project '$PROJECT_NAME' created
 
 Module: $module_display
 Author: $AUTHOR_NAME
 Language: $lang_display
 
 Co-Authored-By: Claude <noreply@anthropic.com>"
+    fi
 
     print_success "Git initialized"
 
@@ -1286,42 +1463,46 @@ main() {
     echo -e "    ${CYAN}claude${NC}"
     echo ""
 
-    # Show workflows from language.yaml
-    local module_path="$MODULE_DIR/$SELECTED_MODULE"
-    local lang_yaml="$module_path/$SELECTED_LANGUAGE/language.yaml"
+    # Show workflows from language.yaml (only for standard modules)
+    if [ "$CUSTOM_MODULE" != true ]; then
+        local module_path="$MODULE_DIR/$SELECTED_MODULE"
+        local lang_yaml="$module_path/$SELECTED_LANGUAGE/language.yaml"
 
-    # Check if we have example workflows
-    if grep -q "^example_workflows:" "$lang_yaml" 2>/dev/null; then
-        echo "  Available Workflows:"
+        # Check if we have example workflows
+        if grep -q "^example_workflows:" "$lang_yaml" 2>/dev/null; then
+            echo "  Available Workflows:"
 
-        # Parse example_workflows (simple format: - command: "...", description: "...")
-        local in_workflows=false
-        local current_command=""
-        while IFS= read -r line; do
-            if [[ "$line" =~ ^example_workflows: ]]; then
-                in_workflows=true
-                continue
-            fi
-
-            if $in_workflows; then
-                # Exit if we hit another root-level key
-                if [[ "$line" =~ ^[a-z_]+: ]] && [[ ! "$line" =~ ^[[:space:]] ]]; then
-                    break
+            # Parse example_workflows (simple format: - command: "...", description: "...")
+            local in_workflows=false
+            local current_command=""
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^example_workflows: ]]; then
+                    in_workflows=true
+                    continue
                 fi
 
-                # Extract command
-                if [[ "$line" =~ command:[[:space:]]*\"([^\"]+)\" ]]; then
-                    current_command="${BASH_REMATCH[1]}"
-                fi
+                if $in_workflows; then
+                    # Exit if we hit another root-level key
+                    if [[ "$line" =~ ^[a-z_]+: ]] && [[ ! "$line" =~ ^[[:space:]] ]]; then
+                        break
+                    fi
 
-                # Extract description and print
-                if [[ "$line" =~ description:[[:space:]]*\"([^\"]+)\" ]] && [ -n "$current_command" ]; then
-                    local desc="${BASH_REMATCH[1]}"
-                    printf "    %-28s — %s\n" "$current_command" "$desc"
-                    current_command=""
+                    # Extract command
+                    if [[ "$line" =~ command:[[:space:]]*\"([^\"]+)\" ]]; then
+                        current_command="${BASH_REMATCH[1]}"
+                    fi
+
+                    # Extract description and print
+                    if [[ "$line" =~ description:[[:space:]]*\"([^\"]+)\" ]] && [ -n "$current_command" ]; then
+                        local desc="${BASH_REMATCH[1]}"
+                        printf "    %-28s — %s\n" "$current_command" "$desc"
+                        current_command=""
+                    fi
                 fi
-            fi
-        done < "$lang_yaml"
+            done < "$lang_yaml"
+        fi
+    else
+        echo "  Your project was created from template: $CUSTOM_REPO"
     fi
 
     echo ""
